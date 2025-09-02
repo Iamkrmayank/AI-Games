@@ -2,19 +2,20 @@
 # Streamlit + Azure GPT-5 streaming code generator with live Phaser preview.
 # - Streams model output token-by-token
 # - Shows growing code
-# - Re-renders preview whenever there's a valid HTML OR autowraps a JS snippet
+# - Re-renders preview whenever there's a valid page (or auto-wraps JS)
 # - Lets you download the latest HTML as index.html
 
-import os
 import re
 import time
 import json
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from typing import Generator, Optional
+from typing import Generator
 
-# ========== Azure GPT-5 (Chat Completions) STREAMING ==========
+# =========================
+# Azure GPT-5 (Chat Completions) STREAMING
+# =========================
 def have_azure() -> bool:
     try:
         s = st.secrets["azure"]
@@ -25,7 +26,7 @@ def have_azure() -> bool:
 def stream_azure_chat(system: str, user: str, temperature: float = 0.6) -> Generator[str, None, None]:
     """
     Streams content tokens from Azure Chat Completions (SSE-like).
-    Yields str chunks (delta content).
+    Yields text chunks (delta content).
     """
     s = st.secrets["azure"]
     api_key = s["AZURE_API_KEY"]
@@ -42,7 +43,6 @@ def stream_azure_chat(system: str, user: str, temperature: float = 0.6) -> Gener
         ],
         "temperature": temperature,
         "stream": True,
-        # Strong hint to return HTML/JS only
         "max_tokens": 2000,
     }
 
@@ -51,23 +51,22 @@ def stream_azure_chat(system: str, user: str, temperature: float = 0.6) -> Gener
         for line in r.iter_lines(decode_unicode=True):
             if not line:
                 continue
-            # Azure returns SSE-like lines beginning with "data: {...}"
             if line.startswith("data: "):
                 data_str = line[len("data: "):]
                 if data_str.strip() == "[DONE]":
                     break
                 try:
                     data = json.loads(data_str)
-                    # Azure format: choices[0].delta.content
                     delta = data.get("choices", [{}])[0].get("delta", {})
                     content = delta.get("content")
                     if content:
                         yield content
                 except Exception:
-                    # Robust to non-JSON (keep streaming)
                     continue
 
-# ========== Helpers: detect HTML page / wrap snippets ==========
+# =========================
+# Helpers: detect HTML / wrap JS
+# =========================
 HTML_TAG_RE = re.compile(r"<\s*html\b", re.I)
 END_HTML_RE = re.compile(r"</\s*html\s*>", re.I)
 SCRIPT_TAG_RE = re.compile(r"<\s*script\b", re.I)
@@ -80,7 +79,7 @@ PHASER_SCAFFOLD = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.js"></script>
     <style>
-      html, body {{ margin:0; padding:0; background:#0e1a20; }}
+      html, body {{ margin:0; padding:0; background:{bg}; }}
       #wrap {{ width:100%; height:100vh; display:flex; align-items:center; justify-content:center; }}
       .note {{ position: fixed; left: 12px; top: 8px; color:#cde4ef; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; opacity:.85; }}
     </style>
@@ -89,7 +88,6 @@ PHASER_SCAFFOLD = """<!DOCTYPE html>
     <div id="wrap"></div>
     <div class="note">Phaser preview — generated live</div>
     <script>
-      // Basic canvas + scale that works on Streamlit
       const config = {{
         type: Phaser.AUTO,
         width: {width},
@@ -99,14 +97,11 @@ PHASER_SCAFFOLD = """<!DOCTYPE html>
         backgroundColor: '{bg}',
         scene: {{ preload, create, update }}
       }};
-
       function preload() {{}}
       function create() {{
-        // Placeholder: background rect so the canvas is visible
         this.add.rectangle({width}//2, {height}//2, {width}-20, {height}-20, 0x1A2A32).setStrokeStyle(2, 0xffffff, 0.15);
       }}
       function update() {{}}
-
       new Phaser.Game(config);
     </script>
 
@@ -123,42 +118,27 @@ def looks_like_full_html(text: str) -> bool:
     return bool(HTML_TAG_RE.search(text) and END_HTML_RE.search(text))
 
 def autowrap_if_needed(generated: str, *, title="Phaser Live Preview", width=720, height=1280, bg="#0e1a20") -> str:
-    """
-    If the model output is a full HTML page, return as-is.
-    If it's <script>...</script> or plain JS, wrap in a safe Phaser scaffold.
-    """
+    """If output is a full HTML page, return as-is. Else, wrap as a script in a safe Phaser scaffold."""
     if looks_like_full_html(generated):
         return generated
 
-    # Strip code fences if any
     stripped = generated.strip()
     if stripped.startswith("```"):
-        # remove triple-backtick wrappers
         stripped = re.sub(r"^```[^\n]*\n", "", stripped)
         stripped = re.sub(r"\n```$", "", stripped)
 
-    # If it already contains <script>, just use inside the scaffold verbatim
-    if SCRIPT_TAG_RE.search(stripped):
-        snippet = stripped
-    else:
-        snippet = stripped  # plain JS (scene code etc.)
+    snippet = stripped  # works for <script> or plain JS
+    return PHASER_SCAFFOLD.format(title=title, width=width, height=height, bg=bg, snippet=snippet)
 
-    return PHASER_SCAFFOLD.format(
-        title=title,
-        width=width,
-        height=height,
-        bg=bg,
-        snippet=snippet
-    )
-
-# ========== Streamlit UI ==========
+# =========================
+# Streamlit UI
+# =========================
 st.set_page_config(page_title="Streaming Phaser Generator", page_icon="🎮", layout="wide")
 st.title("🎮 ChatGPT-style Streaming → Live Phaser 2D Preview")
 
 st.markdown(
-    "Type a prompt that describes the Phaser **2D mini-game** you want. "
-    "The model will stream out code, and we’ll re-render the **preview** as soon as the output is a valid page "
-    "or can be safely auto-wrapped."
+    "Type a prompt describing the **Phaser 3** mini-game you want. "
+    "We stream code as it’s generated and update the **preview** as soon as possible."
 )
 
 with st.sidebar:
@@ -187,14 +167,13 @@ if "latest_html" not in st.session_state:
 if "is_generating" not in st.session_state:
     st.session_state.is_generating = False
 
-# Chat-like input
 prompt = st.text_area(
     "Prompt",
-    placeholder="Example: Build a two-stage card tap mini-game (K→Q→4→5→6→7→8 then 6→7→8) with a tutorial hand and a CTA at the end.",
-    height=100
+    placeholder="Example: Two-stage card tap mini-game (K→Q→4→5→6→7→8 then 6→7→8) with a tutorial hand and a pulsing CTA.",
+    height=110
 )
 
-colA, colB = st.columns([1,1])
+colA, colB = st.columns([1, 1])
 start = colA.button("Generate (stream)", type="primary", disabled=st.session_state.is_generating or not prompt.strip())
 clear = colB.button("Clear output", disabled=st.session_state.is_generating)
 
@@ -207,26 +186,23 @@ code_placeholder = st.empty()
 preview_placeholder = st.empty()
 download_placeholder = st.empty()
 
-def _maybe_update_preview_from_buffer():
-    """
-    Try to build a valid page from the current buffer.
-    If full HTML detected -> use it.
-    Else -> autowrap the buffer as JS snippet and render.
-    """
+def _render_preview_from_buffer():
+    """Try to build a valid page from the current buffer and render in the placeholder."""
     buf = st.session_state.buffer
     if not buf.strip():
         return
-
-    # If it looks like a complete HTML doc -> use
     if looks_like_full_html(buf):
         st.session_state.latest_html = buf
     else:
-        # If it's likely code, wrap (even if partial, wrapping gives the browser something valid).
-        wrapped = autowrap_if_needed(buf, width=width, height=height, bg=bg)
-        st.session_state.latest_html = wrapped
+        st.session_state.latest_html = autowrap_if_needed(buf, width=width, height=height, bg=bg)
 
-    # Render
-    preview_placeholder.components.html(st.session_state.latest_html, height=min(max(height + 60, 600), 1400), scrolling=False)
+    # IMPORTANT: render inside the placeholder context (fixes AttributeError)
+    with preview_placeholder:
+        components.html(
+            st.session_state.latest_html,
+            height=min(max(height + 60, 600), 1400),
+            scrolling=False
+        )
 
 if start:
     if not have_azure():
@@ -237,28 +213,27 @@ if start:
         code_placeholder.code("// streaming…", language="html")
 
         try:
-            # Start streaming
             for chunk in stream_azure_chat(SYSTEM, prompt, temperature=creativity):
                 st.session_state.buffer += chunk
-
-                # Update code block quickly
                 code_placeholder.code(st.session_state.buffer, language="html")
-
-                # Re-render preview opportunistically (don't do it *too* often for performance)
-                _maybe_update_preview_from_buffer()
-                # Small sleep makes UI pleasant and reduces excessive re-rendering
+                _render_preview_from_buffer()
                 time.sleep(0.03)
-
         except Exception as e:
             st.error(f"Error while streaming: {e}")
-
         finally:
             st.session_state.is_generating = False
 
-# If we have a previously generated page, show it.
+# If something was generated earlier, show it again (e.g., after rerun)
 if st.session_state.latest_html:
-    preview_placeholder.components.html(st.session_state.latest_html, height=min(max(height + 60, 600), 1400), scrolling=False)
-    # Download
+    with preview_placeholder:
+        components.html(
+            st.session_state.latest_html,
+            height=min(max(height + 60, 600), 1400),
+            scrolling=False
+        )
+
+# Download button
+if st.session_state.latest_html:
     if download_placeholder.button("Download index.html"):
         out_path = "/mnt/data/index.html"
         with open(out_path, "w", encoding="utf-8") as f:
